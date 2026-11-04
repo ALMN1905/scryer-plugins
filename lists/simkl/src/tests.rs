@@ -1571,3 +1571,125 @@ fn custom_private_list_is_gone_but_scope_errors_still_require_reconnection() {
         assert_eq!(error.public_message.contains("not found"), gone);
     }
 }
+
+#[test]
+fn list_scope_adds_only_literal_true_flags_and_defaults_to_owned_lists() {
+    assert_eq!(ListScope::default().query(), "");
+    assert_eq!(
+        ListScope {
+            followed: true,
+            collaborative: false
+        }
+        .query(),
+        "&followed=true"
+    );
+    assert_eq!(
+        ListScope {
+            followed: false,
+            collaborative: true
+        }
+        .query(),
+        "&collaborants=true"
+    );
+    assert_eq!(
+        ListScope {
+            followed: true,
+            collaborative: true
+        }
+        .query(),
+        "&followed=true&collaborants=true"
+    );
+}
+
+#[test]
+fn list_scope_reads_the_installation_switches() {
+    let read = |on: &'static [&'static str]| {
+        move |key: &str| on.contains(&key).then(|| " True ".to_string())
+    };
+    assert_eq!(ListScope::from_config(read(&[])), ListScope::default());
+    assert_eq!(
+        ListScope::from_config(read(&[CONFIG_INCLUDE_FOLLOWED])),
+        ListScope {
+            followed: true,
+            collaborative: false
+        }
+    );
+    assert_eq!(
+        ListScope::from_config(|_| Some("yes".to_string())),
+        ListScope::default()
+    );
+    let settings = descriptor().settings;
+    assert_eq!(
+        settings
+            .iter()
+            .map(|s| s.field.key.as_str())
+            .collect::<Vec<_>>(),
+        [CONFIG_INCLUDE_FOLLOWED, CONFIG_INCLUDE_COLLABORATIVE]
+    );
+    assert!(settings.iter().all(|s| {
+        s.field.field_type == scryer_plugin_sdk::ConfigFieldType::Bool
+            && s.field.default_value.as_deref() == Some("false")
+            && !s.sensitive
+    }));
+}
+
+#[test]
+fn custom_discovery_asks_for_followed_lists_keeps_names_and_orders_by_role() {
+    let body = serde_json::json!({"pagination":{"page":1,"limit":500,"total_items":5,"total_pages":1},
+        "lists":[{"id":4431,"name":"Dexter franchise","media_type":"tv","role":"follower"},
+                 {"id":991,"name":"Mine","media_type":"movies","role":"owner"},
+                 {"id":5,"name":"Shared","media_type":"anime","role":"collaborator"},
+                 {"id":6,"name":"Buffyverse","media_type":"tv","role":"follower"},
+                 {"id":992,"name":"Mine too","media_type":"tv","role":"owner"}]});
+    let url = format!(
+        "{}&followed=true&collaborants=true",
+        custom_index_url("990001", 1)
+    );
+    let http = RecordedHttp::new()
+        .with(&api("/users/settings"), 200, SETTINGS)
+        .with(&url, 200, &body.to_string());
+    let scope = ListScope {
+        followed: true,
+        collaborative: true,
+    };
+    let response = block_on(account_with(&http, CLIENT_ID, &credential(), scope)).unwrap();
+    assert_eq!(
+        response
+            .owned_lists
+            .iter()
+            .map(|list| (list.id.as_str(), list.name.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("991", "Mine"),
+            ("992", "Mine too"),
+            ("5", "Shared"),
+            ("4431", "Dexter franchise"),
+            ("6", "Buffyverse")
+        ]
+    );
+}
+
+#[test]
+fn a_refused_scoped_request_fails_the_account_read_visibly() {
+    let url = format!("{}&followed=true", custom_index_url("990001", 1));
+    let http = RecordedHttp::new()
+        .with(&api("/users/settings"), 200, SETTINGS)
+        .with(&url, 403, r#"{"error":"insufficient_scope"}"#);
+    let scope = ListScope {
+        followed: true,
+        collaborative: false,
+    };
+    assert!(block_on(account_with(&http, CLIENT_ID, &credential(), scope)).is_err());
+}
+
+#[test]
+fn installation_settings_are_read_under_the_host_prefix() {
+    assert_eq!(
+        settings_config_key(CONFIG_INCLUDE_FOLLOWED),
+        "plugin.settings.include_followed_lists"
+    );
+    assert_eq!(
+        settings_config_key(CONFIG_INCLUDE_COLLABORATIVE),
+        "plugin.settings.include_collaborative_lists"
+    );
+}
